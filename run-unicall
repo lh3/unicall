@@ -1,0 +1,153 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use Getopt::Std;
+
+my %opts = (a=>'fb');
+getopts("o:a:p:gd:", \%opts);
+
+die("Usage: run-unicall [options] <ref.fa> <aln.bam>
+Options:
+  -o STR      output prefix [inferred]
+  -a STR      variant calling algorithm [fb]
+              fb - freebayes, pp - platypus, st - samtools
+              hc - GATK-HaplotypeCAller
+  -p FILE     parallelize by regions in FILE (BED format) [null]
+  -g          re-call genotypes from PL/GL
+") if @ARGV < 2;
+
+my ($ref, $bam, $algo) = ($ARGV[0], $ARGV[1], $opts{a});
+my @mak = ();
+
+# check path
+my $exepath = $0 =~/^\S+\/[^\/\s]+/? $0 : &which($0);
+my $root = $0 =~/^(\S+)\/[^\/\s]+/? $1 : undef;
+$root = $exepath =~/^(\S+)\/[^\/\s]+/? $1 : undef if !defined($root);
+die "ERROR: failed to locate the root directory\n" if !defined($root);
+push(@mak, "ROOT=$root");
+push(@mak, 'HAPDIP=$(ROOT)/k8 $(ROOT)/hapdip.js');
+
+# infer prefix
+my $prefix;
+if (defined $opts{o}) {
+	$prefix = $opts{o};
+} elsif ($ARGV[1] =~ /\.bam$/) {
+	$prefix = $ARGV[1];
+	$prefix =~ s/\.bam$//;
+}
+die "ERROR: failed to infer the prefix for output. Please specify -o.\n" unless defined($prefix);
+push(@mak, "PREFIX=$prefix");
+
+# test FASTA index
+die "ERROR: failed to locate the FASTA index.\n" unless (-f "$ref.fai");
+if ($algo eq 'hc' || $algo eq 'ug') {
+	die qq(ERROR: failed to localte the FASTA dict file required by GATK. Run the following to generate:
+       awk '{print "\@SQ\\t"SN:\$1"\\tLN:\$2"}' $ref.fai > $ref.dict\n) unless (-f "$ref.dict");
+}
+push(@mak, "ALN=$bam");
+push(@mak, "REF=$ref");
+
+# test BAM index
+unless (-f "$bam.bai") {
+	my $tmp = $bam;
+	$tmp =~ s/\.bam$/.bai/;
+	die "ERROR: failed to locate the BAM index.\n" unless (-f $tmp);
+}
+
+push(@mak, '');
+push(@mak, 'all:$(PREFIX).raw.vcf.gz.tbi $(PREFIX).flt.vcf.gz.tbi', "");
+
+# test GATK
+if ($algo eq 'hc') {
+	die "ERROR: failed to locate file 'GenomeAnalysisTK.jar'. Please copy it to $root.\n" unless (-f "$root/GenomeAnalysisTK.jar");
+}
+
+# read regions to parallelize
+my @split = ();
+if (defined $opts{p}) {
+	open(FH, $opts{p} =~ /\.gz$/? "gzip -dc $opts{p} |" : $opts{p}) || open(FH, "$root/$opts{p}-regions.bed") || die "ERROR: failed to open the region BED";
+	while (<FH>) {
+		chomp;
+		my @t = split("\t");
+		push(@split, [$t[0], $t[1], $t[2]]);
+	}
+	close(FH);
+}
+
+# generate raw VCF
+if (@split != 0) {
+	my $line = '';
+	for (my $i = 0; $i < @split; $i += 4) {
+		$line .= " \\\n" if $i;
+		$line .= $i == 0? '$(PREFIX).raw.vcf.gz:' : '  ';
+		for (my $j = 0; $j < 4 && $i + $j < @split; ++$j) {
+			$line .= ' ' if $j;
+			$line .= '$(PREFIX).split-' . join("_", @{$split[$i+$j]}) . '.vcf';
+		}
+	}
+	push(@mak, $line);
+	push(@mak, "\t" . q[(awk '/^#/{print}!/^#/{exit}' $<; echo $^ | xargs cat | grep -v "^#") | $(ROOT)/htsbox bgzip > $@], '');
+	for my $reg (@split) {
+		push(@mak, &call(\%opts, $reg));
+	}
+} else {
+	push(@mak, '$(PREFIX).raw.vcf.gz:$(PREFIX).raw.vcf');
+	push(@mak, "\t" . '$(ROOT)/htsbox bgzip $<', '');
+	push(@mak, &call(\%opts));
+}
+
+# filter
+my $cmd = defined($opts{g})? ' | $(HAPDIP) upd1gt' : '';
+push(@mak, '$(PREFIX).anno.gz:$(PREFIX).raw.vcf.gz');
+push(@mak, "\t" . '$(HAPDIP) deovlp $<' . $cmd . ' | $(HAPDIP) anno | gzip -1 > $@', '');
+push(@mak, '$(PREFIX).flt.vcf.gz:$(PREFIX).anno.gz');
+push(@mak, "\t" . '$(HAPDIP) filter $< | $(ROOT)/htsbox bgzip > $@', '');
+
+# tabix
+push(@mak, '$(PREFIX).raw.vcf.gz.tbi:$(PREFIX).raw.vcf.gz');
+push(@mak, '	$(ROOT)/htsbox tabix -pvcf $<', "");
+push(@mak, '$(PREFIX).flt.vcf.gz.tbi:$(PREFIX).flt.vcf.gz');
+push(@mak, '	$(ROOT)/htsbox tabix -pvcf $<', "");
+
+# print Makefile
+print join("\n", @mak), "\n";
+
+sub which {
+	my $file = shift;
+	my $path = (@_)? shift : $ENV{PATH};
+	return if (!defined($path));
+	foreach my $x (split(":", $path)) {
+		$x =~ s/\/$//;
+		return "$x/$file" if (-x "$x/$file");
+	}
+	return;
+}
+
+sub call {
+	my $opts = shift;
+	my $reg = shift;
+	my $algo = $opts->{a};
+	my $vcf = defined($reg)? '$(PREFIX).split-' . join("_", @$reg) . ".vcf" : '$(PREFIX).raw.vcf';
+	my (@mak, $cmd);
+	push(@mak, "$vcf:" . '$(ALN)');
+	if ($algo eq 'hc') {
+		$cmd = 'java -Xmx6g -jar $(ROOT)/GenomeAnalysisTK.jar -T HaplotypeCaller -R $(REF) -gt_mode DISCOVERY -stand_call_conf 30 -stand_emit_conf 10 -o $@ -I $<';
+		$cmd .= " -L $reg->[0]:" . ($reg->[1] + 1) . "-$reg->[2]" if defined($reg);
+	} elsif ($algo eq 'fb') {
+		if (defined $opts->{d}) {
+			$cmd = '$(ROOT)/htsbox samview -l0 -d' . $opts->{d} . ' $<';
+			$cmd .= " $reg->[0]:" . ($reg->[1] + 1) . "-$reg->[2]" if defined($reg);
+			$cmd .= ' | $(ROOT)/freebayes -f $(REF) /dev/stdin > $@';
+		} else {
+			$cmd = '$(ROOT)/freebayes -f $(REF)';
+			$cmd .= " -r $reg->[0]:$reg->[1]-$reg->[2]" if defined($reg);
+			$cmd .= ' $< > $@';
+		}
+	} elsif ($algo eq 'pp') {
+		$cmd = '$(ROOT)/platypus.sh callVariants --refFile=$(REF) --bamFiles=$< --output=$@';
+		$cmd .= " --region=$reg->[0]:$reg->[1]-$reg->[2]" if defined($reg);
+	}
+	push(@mak, "\t$cmd", "");
+	return @mak;
+}
