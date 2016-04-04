@@ -42,7 +42,7 @@ $hg19{"chr$_"} = $hs37{$_} for (keys %hs37);
 my %opts = (a=>'fb', M=>'4g', e=>.01);
 getopts("a:p:Ge:M:", \%opts);
 
-die("Usage: run-unicall [options] <ref.fa> <aln.bam> [...]
+die("Usage: run-unicall [options] <ref.fa> [prefix:]<aln.bam> [...]
 General options:
   -p FILE     call regions in BED FILE in parallel [inferred]
   -G          don't re-call genotypes from PL/GL
