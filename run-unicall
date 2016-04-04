@@ -40,12 +40,12 @@ $hg19{"chr$_"} = $hs37{$_} for (keys %hs37);
 
 # command lines and options
 my %opts = (a=>'fb', M=>'4g', e=>.01);
-getopts("a:p:ge:M:", \%opts);
+getopts("a:p:Ge:M:", \%opts);
 
 die("Usage: run-unicall [options] <ref.fa> <aln.bam> [...]
 General options:
   -p FILE     call regions in BED FILE in parallel [inferred]
-  -g          re-call genotypes from PL/GL
+  -G          don't re-call genotypes from PL/GL
   -a STR      variant calling algorithm [fb]
               fb - freebayes, pp - platypus, st - samtools
               hc - GATK-HaplotypeCaller, ug - UnifiedGenotyper
@@ -173,7 +173,7 @@ for (my $i = 0; $i < @bam; ++$i) {
 	}
 	
 	# filter
-	my $cmd = defined($opts{g})? ' | $(HAPDIP) upd1gt' : '';
+	my $cmd = !defined($opts{G})? ' | $(HAPDIP) upd1gt -q' : '';
 	push(@mak, "$prefix.anno.gz:$prefix.raw.vcf.gz");
 	push(@mak, "\t" . '$(HAPDIP) deovlp $<' . $cmd . ' | $(HAPDIP) anno | gzip -1 > $@', '');
 	push(@mak, "$prefix.flt.vcf.gz:$prefix.anno.gz");
