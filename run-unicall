@@ -4,17 +4,28 @@ use strict;
 use warnings;
 use Getopt::Std;
 
-my %opts = (a=>'fb');
-getopts("o:a:p:gd:", \%opts);
+my %opts = (a=>'fb', M=>'4g', e=>.01);
+getopts("o:a:p:ge:M:", \%opts);
 
 die("Usage: run-unicall [options] <ref.fa> <aln.bam>
-Options:
+General options:
   -o STR      output prefix [inferred]
+  -p FILE/STR call regions in BED FILE in parallel [single-process]
+              STR could be hs37, hg19 or hg38 for precomputed intervals
+  -g          re-call genotypes from PL/GL
   -a STR      variant calling algorithm [fb]
               fb - freebayes, pp - platypus, st - samtools
-              hc - GATK-HaplotypeCAller
-  -p FILE     parallelize by regions in FILE (BED format) [null]
-  -g          re-call genotypes from PL/GL
+              hc - GATK-HaplotypeCaller, ug - UnifiedGenotyper
+
+FreeBayes options:
+  -e FLOAT    coefficient to skip poorly mapped reads (0.01 recommended for human) [disabled]
+
+GATK options:
+  -M STR      max Java heap size [4g]
+
+Example:
+  unicall.kit/run-unicall -p hg19 -e.01 hg19.fa aln.bam > run.mak && make -j8 -f run.mak
+  unicall.kit/run-unicall -p hs37 -a hc hs37d5.fa aln.bam > run.mak && make -j8 -f run.mak
 ") if @ARGV < 2;
 
 my ($ref, $bam, $algo) = ($ARGV[0], $ARGV[1], $opts{a});
@@ -27,6 +38,9 @@ $root = $exepath =~/^(\S+)\/[^\/\s]+/? $1 : undef if !defined($root);
 die "ERROR: failed to locate the root directory\n" if !defined($root);
 push(@mak, "ROOT=$root");
 push(@mak, 'HAPDIP=$(ROOT)/k8 $(ROOT)/hapdip.js');
+
+# check if -e is applied for "-a fb"
+warn "WARNING: for human reads mapped with bwa-mem, '-e.01' is recommended for freebayes\n" if ($algo eq 'fb' && !defined($opts{e}));
 
 # infer prefix
 my $prefix;
@@ -42,8 +56,10 @@ push(@mak, "PREFIX=$prefix");
 # test FASTA index
 die "ERROR: failed to locate the FASTA index.\n" unless (-f "$ref.fai");
 if ($algo eq 'hc' || $algo eq 'ug') {
+	my $tmp = $ref;
+	$tmp =~ s/\.fa(sta)?$//g;
 	die qq(ERROR: failed to localte the FASTA dict file required by GATK. Run the following to generate:
-       awk '{print "\@SQ\\t"SN:\$1"\\tLN:\$2"}' $ref.fai > $ref.dict\n) unless (-f "$ref.dict");
+       awk '{print "\@SQ\\t"SN:\$1"\\tLN:\$2"}' $ref.fai > $tmp.dict\n) unless (-f "$tmp.dict");
 }
 push(@mak, "ALN=$bam");
 push(@mak, "REF=$ref");
@@ -59,7 +75,8 @@ push(@mak, '');
 push(@mak, 'all:$(PREFIX).raw.vcf.gz.tbi $(PREFIX).flt.vcf.gz.tbi', "");
 
 # test GATK
-if ($algo eq 'hc') {
+if ($algo eq 'hc' || $algo eq 'hc') {
+	die qq(ERROR: failed to locate the 'java' executable\n) unless &which('java');
 	die "ERROR: failed to locate file 'GenomeAnalysisTK.jar'. Please copy it to $root.\n" unless (-f "$root/GenomeAnalysisTK.jar");
 }
 
@@ -113,6 +130,8 @@ push(@mak, '	$(ROOT)/htsbox tabix -pvcf $<', "");
 # print Makefile
 print join("\n", @mak), "\n";
 
+exit(0);
+
 sub which {
 	my $file = shift;
 	my $path = (@_)? shift : $ENV{PATH};
@@ -132,15 +151,22 @@ sub call {
 	my (@mak, $cmd);
 	push(@mak, "$vcf:" . '$(ALN)');
 	if ($algo eq 'hc') {
-		$cmd = 'java -Xmx6g -jar $(ROOT)/GenomeAnalysisTK.jar -T HaplotypeCaller -R $(REF) -gt_mode DISCOVERY -stand_call_conf 30 -stand_emit_conf 10 -o $@ -I $<';
+		$cmd = 'java -Xmx' . $opts{M} . ' -jar $(ROOT)/GenomeAnalysisTK.jar -T HaplotypeCaller -R $(REF) -gt_mode DISCOVERY -stand_call_conf 30 -stand_emit_conf 10 -o $@ -I $<';
 		$cmd .= " -L $reg->[0]:" . ($reg->[1] + 1) . "-$reg->[2]" if defined($reg);
+	} elsif ($algo eq 'ug') {
+		$cmd = 'java -Xmx' . $opts{M} . ' -jar $(ROOT)/GenomeAnalysisTK.jar -T UnifiedGenotyper -R $(REF) -glm BOTH -stand_call_conf 30 -stand_emit_conf 10 -o $@ -I $<';
+		$cmd .= " -L $reg->[0]:" . ($reg->[1] + 1) . "-$reg->[2]" if defined($reg);
+	} elsif ($algo eq 'st') {
+		$cmd = '$(ROOT)/samtools mpileup -ugf $(REF)';
+		$cmd .= " -r $reg->[0]:" . ($reg->[1] + 1) . "-$reg->[2]" if defined($reg);
+		$cmd .= ' $< | $(ROOT)/bcftools call -vmO v -o $@';
 	} elsif ($algo eq 'fb') {
-		if (defined $opts->{d}) {
-			$cmd = '$(ROOT)/htsbox samview -l0 -d' . $opts->{d} . ' $<';
+		if (defined $opts->{e}) {
+			$cmd = '$(ROOT)/htsbox samview -l0 -e' . $opts->{e} . ' $<';
 			$cmd .= " $reg->[0]:" . ($reg->[1] + 1) . "-$reg->[2]" if defined($reg);
-			$cmd .= ' | $(ROOT)/freebayes -f $(REF) /dev/stdin > $@';
+			$cmd .= ' | $(ROOT)/freebayes -f $(REF) -P.5 /dev/stdin > $@';
 		} else {
-			$cmd = '$(ROOT)/freebayes -f $(REF)';
+			$cmd = '$(ROOT)/freebayes -f $(REF) -P.5';
 			$cmd .= " -r $reg->[0]:$reg->[1]-$reg->[2]" if defined($reg);
 			$cmd .= ' $< > $@';
 		}
