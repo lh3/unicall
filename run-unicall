@@ -40,11 +40,10 @@ $hg19{"chr$_"} = $hs37{$_} for (keys %hs37);
 
 # command lines and options
 my %opts = (a=>'fb', M=>'4g', e=>.01);
-getopts("o:a:p:ge:M:", \%opts);
+getopts("a:p:ge:M:", \%opts);
 
-die("Usage: run-unicall [options] <ref.fa> <aln.bam>
+die("Usage: run-unicall [options] <ref.fa> <aln.bam> [...]
 General options:
-  -o STR      output prefix [inferred]
   -p FILE     call regions in BED FILE in parallel [inferred]
   -g          re-call genotypes from PL/GL
   -a STR      variant calling algorithm [fb]
@@ -62,7 +61,8 @@ Example:
   unicall.kit/run-unicall -p hs37 -a hc hs37d5.fa aln.bam > run.mak && make -j8 -f run.mak
 ") if @ARGV < 2;
 
-my ($ref, $bam, $algo) = ($ARGV[0], $ARGV[1], $opts{a});
+my $ref = shift(@ARGV);
+my $algo = $opts{a};
 my @mak = ();
 
 # check path
@@ -76,17 +76,12 @@ push(@mak, 'HAPDIP=$(ROOT)/k8 $(ROOT)/hapdip.js');
 # check if -e is applied for "-a fb"
 warn "WARNING: for human reads mapped with bwa-mem, '-e.01' is recommended for freebayes\n" if ($algo eq 'fb' && !defined($opts{e}));
 
-# infer prefix
-my $prefix;
-if (defined $opts{o}) {
-	$prefix = $opts{o};
-} elsif ($ARGV[1] =~ /\.bam$/) {
-	$prefix = $ARGV[1];
-	$prefix =~ s/\.bam$//;
+# test GATK
+if ($algo eq 'hc' || $algo eq 'ug') {
+	die qq(ERROR: failed to locate the 'java' executable\n) unless &which('java');
+	die "ERROR: failed to locate file 'GenomeAnalysisTK.jar'. Please copy it to $root.\n" unless (-f "$root/GenomeAnalysisTK.jar");
 }
-die "ERROR: failed to infer the prefix for output. Please specify -o.\n" unless defined($prefix);
-push(@mak, "PREFIX=$prefix");
-
+	
 # test FASTA index
 die "ERROR: failed to locate the FASTA index.\n" unless (-f "$ref.fai");
 if ($algo eq 'hc' || $algo eq 'ug') {
@@ -95,24 +90,7 @@ if ($algo eq 'hc' || $algo eq 'ug') {
 	die qq(ERROR: failed to localte the FASTA dict file required by GATK. Run the following to generate:
        awk '{print "\@SQ\\t"SN:\$1"\\tLN:\$2"}' $ref.fai > $tmp.dict\n) unless (-f "$tmp.dict");
 }
-push(@mak, "ALN=$bam");
 push(@mak, "REF=$ref");
-
-# test BAM index
-unless (-f "$bam.bai") {
-	my $tmp = $bam;
-	$tmp =~ s/\.bam$/.bai/;
-	die "ERROR: failed to locate the BAM index.\n" unless (-f $tmp);
-}
-
-push(@mak, '');
-push(@mak, 'all:$(PREFIX).raw.vcf.gz.tbi $(PREFIX).flt.vcf.gz.tbi', "");
-
-# test GATK
-if ($algo eq 'hc' || $algo eq 'ug') {
-	die qq(ERROR: failed to locate the 'java' executable\n) unless &which('java');
-	die "ERROR: failed to locate file 'GenomeAnalysisTK.jar'. Please copy it to $root.\n" unless (-f "$root/GenomeAnalysisTK.jar");
-}
 
 # find the genome version
 unless (defined $opts{p}) {
@@ -141,40 +119,70 @@ if (defined $opts{p}) {
 	close(FH);
 }
 
-# generate raw VCF
-if (@split != 0) {
-	my $line = '';
-	for (my $i = 0; $i < @split; $i += 4) {
-		$line .= " \\\n" if $i;
-		$line .= $i == 0? '$(PREFIX).raw.vcf.gz:' : '  ';
-		for (my $j = 0; $j < 4 && $i + $j < @split; ++$j) {
-			$line .= ' ' if $j;
-			$line .= '$(PREFIX).split-' . join("_", @{$split[$i+$j]}) . '.vcf';
-		}
+# generate prefix
+my (@prefix, @bam);
+for (my $i = 0; $i < @ARGV; ++$i) {
+	my $tmp = $ARGV[$i];
+	if (-f $tmp && $tmp =~ /\.(bam|cram)$/) {
+		$prefix[$i] = $bam[$i] = $tmp;
+		$prefix[$i] =~ s/\.(bam|cram)$//;
+	} elsif ($tmp =~ /^([^\s:]+):(\S+)/ && -f $2) {
+		$prefix[$i] = $1;
+		$bam[$i] = $2;
+	} else {
+		die "ERROR: failed to infer the prefix for input '$ARGV[$i]'\n";
 	}
-	push(@mak, $line);
-	push(@mak, "\t" . q[(awk '/^#/{print}!/^#/{exit}' $<; echo $^ | xargs cat | grep -v "^#") | $(ROOT)/htsbox bgzip > $@], '');
-	for my $reg (@split) {
-		push(@mak, &call(\%opts, $reg));
+	unless (-f "$bam[$i].bai") {
+		my $tmp = $bam[$i];
+		$tmp =~ s/\.bam$/.bai/;
+		die "ERROR: failed to locate the BAM index of '$bam[$i]'\n" unless (-f $tmp);
 	}
-} else {
-	push(@mak, '$(PREFIX).raw.vcf.gz:$(PREFIX).raw.vcf');
-	push(@mak, "\t" . '$(ROOT)/htsbox bgzip $<', '');
-	push(@mak, &call(\%opts));
 }
 
-# filter
-my $cmd = defined($opts{g})? ' | $(HAPDIP) upd1gt' : '';
-push(@mak, '$(PREFIX).anno.gz:$(PREFIX).raw.vcf.gz');
-push(@mak, "\t" . '$(HAPDIP) deovlp $<' . $cmd . ' | $(HAPDIP) anno | gzip -1 > $@', '');
-push(@mak, '$(PREFIX).flt.vcf.gz:$(PREFIX).anno.gz');
-push(@mak, "\t" . '$(HAPDIP) filter $< | $(ROOT)/htsbox bgzip > $@', '');
+# generate the main target
+my @all_dep;
+for (my $i = 0; $i < @prefix; ++$i) {
+	push(@all_dep, "$prefix[$i].flt.vcf.gz.tbi");
+}
+push(@mak, '', "all:" . join(" ", @all_dep), '');
 
-# tabix
-push(@mak, '$(PREFIX).raw.vcf.gz.tbi:$(PREFIX).raw.vcf.gz');
-push(@mak, '	$(ROOT)/htsbox tabix -pvcf $<', "");
-push(@mak, '$(PREFIX).flt.vcf.gz.tbi:$(PREFIX).flt.vcf.gz');
-push(@mak, '	$(ROOT)/htsbox tabix -pvcf $<', "");
+# generate split VCFs
+for (my $i = 0; $i < @bam; ++$i) {
+	my ($prefix, $bam) = ($prefix[$i], $bam[$i]);
+	
+	# generate raw VCF
+	if (@split != 0) {
+		my $line = '';
+		for (my $i = 0; $i < @split; $i += 4) {
+			$line .= " \\\n" if $i;
+			$line .= $i == 0? "$prefix.raw.vcf.gz:" : '  ';
+			for (my $j = 0; $j < 4 && $i + $j < @split; ++$j) {
+				$line .= ' ' if $j;
+				$line .= "$prefix.split-" . join("_", @{$split[$i+$j]}) . '.vcf';
+			}
+		}
+		push(@mak, $line);
+		push(@mak, "\t" . q[(awk '/^#/{print}!/^#/{exit}' $<; echo $^ | xargs cat | grep -v "^#") | $(ROOT)/htsbox bgzip > $@], '');
+		for my $reg (@split) {
+			push(@mak, &call(\%opts, $prefix, $bam, $reg));
+		}
+	} else {
+		push(@mak, "$prefix.raw.vcf.gz:$prefix.raw.vcf");
+		push(@mak, "\t" . '$(ROOT)/htsbox bgzip $<', '');
+		push(@mak, &call(\%opts, $prefix, $bam));
+	}
+	
+	# filter
+	my $cmd = defined($opts{g})? ' | $(HAPDIP) upd1gt' : '';
+	push(@mak, "$prefix.anno.gz:$prefix.raw.vcf.gz");
+	push(@mak, "\t" . '$(HAPDIP) deovlp $<' . $cmd . ' | $(HAPDIP) anno | gzip -1 > $@', '');
+	push(@mak, "$prefix.flt.vcf.gz:$prefix.anno.gz");
+	push(@mak, "\t" . '$(HAPDIP) filter $< | $(ROOT)/htsbox bgzip > $@', '');
+	
+	# tabix
+	push(@mak, "$prefix.flt.vcf.gz.tbi:$prefix.flt.vcf.gz");
+	push(@mak, '	$(ROOT)/htsbox tabix -pvcf $<', "");
+}
 
 # print Makefile
 print join("\n", @mak), "\n";
@@ -196,18 +204,20 @@ sub test_fai {
 	my $fai = shift;
 	my $src = shift;
 	for my $key (keys %$src) {
-		return 0 if $src->{$key} != $fai->{$key};
+		return 0 if !defined($fai->{$key}) || $src->{$key} != $fai->{$key};
 	}
 	return 1;
 }
 
 sub call {
 	my $opts = shift;
+	my $prefix = shift;
+	my $bam = shift;
 	my $reg = shift;
 	my $algo = $opts->{a};
-	my $vcf = defined($reg)? '$(PREFIX).split-' . join("_", @$reg) . ".vcf" : '$(PREFIX).raw.vcf';
+	my $vcf = defined($reg)? "$prefix.split-" . join("_", @$reg) . ".vcf" : "$prefix.raw.vcf";
 	my (@mak, $cmd);
-	push(@mak, "$vcf:" . '$(ALN)');
+	push(@mak, "$vcf:" . $bam);
 	if ($algo eq 'hc') {
 		$cmd = 'java -Xmx' . $opts{M} . ' -jar $(ROOT)/GenomeAnalysisTK.jar -T HaplotypeCaller -R $(REF) -gt_mode DISCOVERY -stand_call_conf 30 -stand_emit_conf 10 -o $@ -I $<';
 		$cmd .= " -L $reg->[0]:" . ($reg->[1] + 1) . "-$reg->[2]" if defined($reg);
