@@ -28,14 +28,24 @@ use strict;
 use warnings;
 use Getopt::Std;
 
+# chromosome lengths to determine human genome build
+my (%hs37, %hg19, %hg38);
+%hs37 = (1=>249250621, 2=>243199373, 3=>198022430, 4=>191154276, 5=>180915260, 6=>171115067, 7=>159138663, 8=>146364022, 9=>141213431, 10=>135534747,
+	11=>135006516, 12=>133851895, 13=>115169878, 14=>107349540, 15=>102531392, 16=>90354753, 17=>81195210, 18=>78077248, 19=>59128983, 20=>63025520,
+	21=>48129895, 22=>51304566, X=>155270560);
+%hg38 = (chr1=>248956422, chr2=>242193529, chr3=>198295559, chr4=>190214555, chr5=>181538259, chr6=>170805979, chr7=>159345973, chr8=>145138636, chr9=>138394717, chr10=>133797422,
+	chr11=>135086622, chr12=>133275309, chr13=>114364328, chr14=>107043718, chr15=>101991189, chr16=>90338345, chr17=>83257441, chr18=>80373285, chr19=>58617616, chr20=>64444167,
+	chr21=>46709983, chr22=>50818468, chrX=>156040895);
+$hg19{"chr$_"} = $hs37{$_} for (keys %hs37);
+
+# command lines and options
 my %opts = (a=>'fb', M=>'4g', e=>.01);
 getopts("o:a:p:ge:M:", \%opts);
 
 die("Usage: run-unicall [options] <ref.fa> <aln.bam>
 General options:
   -o STR      output prefix [inferred]
-  -p FILE/STR call regions in BED FILE in parallel [single-process]
-              STR could be hs37, hg19 or hg38 for precomputed intervals
+  -p FILE     call regions in BED FILE in parallel [inferred]
   -g          re-call genotypes from PL/GL
   -a STR      variant calling algorithm [fb]
               fb - freebayes, pp - platypus, st - samtools
@@ -104,6 +114,21 @@ if ($algo eq 'hc' || $algo eq 'ug') {
 	die "ERROR: failed to locate file 'GenomeAnalysisTK.jar'. Please copy it to $root.\n" unless (-f "$root/GenomeAnalysisTK.jar");
 }
 
+# find the genome version
+unless (defined $opts{p}) {
+	my (%fai, $hs_build);
+	open(FH, "$ref.fai") || die "ERROR: failed to open the FASTA index.\n";
+	while (<FH>) {
+		chomp;
+		my @t = split("\t");
+		$fai{$t[0]} = $t[1];
+	}
+	close(FH);
+	if (&test_fai(\%fai, \%hg19)) { $opts{p} = 'hg19'; }
+	elsif (&test_fai(\%fai, \%hs37)) { $opts{p} = 'hs37'; }
+	elsif (&test_fai(\%fai, \%hg38)) { $opts{p} = 'hg38'; }
+}
+
 # read regions to parallelize
 my @split = ();
 if (defined $opts{p}) {
@@ -165,6 +190,15 @@ sub which {
 		return "$x/$file" if (-x "$x/$file");
 	}
 	return;
+}
+
+sub test_fai {
+	my $fai = shift;
+	my $src = shift;
+	for my $key (keys %$src) {
+		return 0 if $src->{$key} != $fai->{$key};
+	}
+	return 1;
 }
 
 sub call {

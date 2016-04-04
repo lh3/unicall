@@ -1,7 +1,7 @@
 ### Getting Started
 
 ```sh
-unicall.kit/run-unicall -p hs37 hs37d5.fa mydata.bam > mydata.mak && make -j8 -f mydata.mak
+unicall.kit/run-unicall hs37d5.fa mydata.bam > mydata.mak && make -j8 -f mydata.mak
 ```
 
 ### Introduction
