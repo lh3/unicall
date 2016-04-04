@@ -73,9 +73,6 @@ die "ERROR: failed to locate the root directory\n" if !defined($root);
 push(@mak, "ROOT=$root");
 push(@mak, 'HAPDIP=$(ROOT)/k8 $(ROOT)/hapdip.js');
 
-# check if -e is applied for "-a fb"
-warn "WARNING: for human reads mapped with bwa-mem, '-e.01' is recommended for freebayes\n" if ($algo eq 'fb' && !defined($opts{e}));
-
 # test GATK
 if ($algo eq 'hc' || $algo eq 'ug') {
 	die qq(ERROR: failed to locate the 'java' executable\n) unless &which('java');
@@ -229,7 +226,7 @@ sub call {
 		$cmd .= " -r $reg->[0]:" . ($reg->[1] + 1) . "-$reg->[2]" if defined($reg);
 		$cmd .= ' $< | $(ROOT)/bcftools call -vmO v -o $@';
 	} elsif ($algo eq 'fb') {
-		if (defined $opts->{e}) {
+		if ($opts->{e} > 0. && $opts->{e} < 1.) {
 			$cmd = '$(ROOT)/htsbox samview -l0 -e' . $opts->{e} . ' $<';
 			$cmd .= " $reg->[0]:" . ($reg->[1] + 1) . "-$reg->[2]" if defined($reg);
 			$cmd .= ' | $(ROOT)/freebayes -f $(REF) -P.5 /dev/stdin > $@';
