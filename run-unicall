@@ -178,7 +178,7 @@ for (my $i = 0; $i < @bam; ++$i) {
 	
 	# tabix
 	push(@mak, "$prefix.flt.vcf.gz.tbi:$prefix.flt.vcf.gz");
-	push(@mak, '	$(ROOT)/htsbox tabix -pvcf $<', "");
+	push(@mak, '	$(ROOT)/htsbox tabix -fpvcf $<', "");
 }
 
 # print Makefile
