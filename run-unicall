@@ -57,8 +57,8 @@ GATK options:
   -M STR      max Java heap size [4g]
 
 Example:
-  unicall.kit/run-unicall -p hg19 -e.01 hg19.fa aln.bam > run.mak && make -j8 -f run.mak
-  unicall.kit/run-unicall -p hs37 -a hc hs37d5.fa aln.bam > run.mak && make -j8 -f run.mak
+  unicall.kit/run-unicall hg19.fa aln.bam > run-fb.mak && make -j8 -f run-fb.mak
+  unicall.kit/run-unicall -a hc hs37d5.fa aln.bam > run-hc.mak && make -j8 -f run-hc.mak
 ") if @ARGV < 2;
 
 my $ref = shift(@ARGV);
