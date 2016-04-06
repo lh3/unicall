@@ -68,5 +68,8 @@ for my $s (@seq) {
 		if ($en != 0 && $st != $en) {
 			print join("\t", $name, $st, $en), "\n";
 		}
+		if ($g[$#g][1] < $len{$s}) {
+			print join("\t", $name, $g[$#g][1], $len{$s}), "\n";
+		}
 	}
 }
