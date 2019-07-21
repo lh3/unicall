@@ -48,7 +48,8 @@ General options:
   -G          don't re-call genotypes from PL/GL
   -a STR      variant calling algorithm [fb]
               fb - freebayes, pp - platypus, st - samtools
-              hc - GATK-HaplotypeCaller, ug - UnifiedGenotyper
+              hc - GATK-HaplotypeCaller v3, ug - UnifiedGenotyper
+              hc4 - GATK-HaplotypeCaller v4
 
 FreeBayes options:
   -e FLOAT    coefficient to skip poorly mapped reads (0.01 recommended for human) [disabled]
@@ -78,14 +79,20 @@ if ($algo eq 'hc' || $algo eq 'ug') {
 	die qq(ERROR: failed to locate the 'java' executable\n) unless &which('java');
 	die "ERROR: failed to locate file 'GenomeAnalysisTK.jar'. Please copy it to $root.\n" unless (-f "$root/GenomeAnalysisTK.jar");
 }
+
+# test GATK4
+if ($algo eq 'hc4') {
+	die qq(ERROR: failed to locate the 'java' executable\n) unless &which('java');
+	die "ERROR: failed to locate file 'gatk-local.jar'. Please copy it to $root.\n" unless (-f "$root/gatk-local.jar");
+}
 	
 # test FASTA index
 die "ERROR: failed to locate the FASTA index.\n" unless (-f "$ref.fai");
-if ($algo eq 'hc' || $algo eq 'ug') {
+if ($algo eq 'hc' || $algo eq 'ug' || $algo eq 'hc4') {
 	my $tmp = $ref;
 	$tmp =~ s/\.fa(sta)?$//g;
 	die qq(ERROR: failed to localte the FASTA dict file required by GATK. Run the following to generate:
-       awk '{print "\@SQ\\t"SN:\$1"\\tLN:\$2"}' $ref.fai > $tmp.dict\n) unless (-f "$tmp.dict");
+       awk '{print "\@SQ\\tSN:"\$1"\\tLN:"\$2}' $ref.fai > $tmp.dict\n) unless (-f "$tmp.dict");
 }
 push(@mak, "REF=$ref");
 
@@ -215,7 +222,13 @@ sub call {
 	my $vcf = defined($reg)? "$prefix.split-" . join("_", @$reg) . ".vcf" : "$prefix.raw.vcf";
 	my (@mak, $cmd);
 	push(@mak, "$vcf:" . $bam);
-	if ($algo eq 'hc') {
+	if ($algo eq 'hc4') {
+		$cmd = 'java -Xmx' .$opts{M};
+		$cmd .= ' -XX:ParallelGCThreads=1 -XX:ConcGCThreads=1';
+		$cmd .= ' -Dsamjdk.use_async_io_read_samtools=false -Dsamjdk.use_async_io_write_samtools=true -Dsamjdk.use_async_io_write_tribble=false -Dsamjdk.compression_level=2';
+		$cmd .= ' -jar $(ROOT)/gatk-local.jar HaplotypeCaller --native-pair-hmm-threads 1 -R $(REF) -I $< -O $@';
+		$cmd .= " -L $reg->[0]:" . ($reg->[1] + 1) . "-$reg->[2]" if defined($reg);
+	} elsif ($algo eq 'hc') {
 		$cmd = 'java -Xmx' . $opts{M} . ' -jar $(ROOT)/GenomeAnalysisTK.jar -T HaplotypeCaller -R $(REF) -gt_mode DISCOVERY -stand_call_conf 30 -stand_emit_conf 10 -o $@ -I $<';
 		$cmd .= " -L $reg->[0]:" . ($reg->[1] + 1) . "-$reg->[2]" if defined($reg);
 	} elsif ($algo eq 'ug') {

@@ -4,12 +4,13 @@ use strict;
 use warnings;
 use Getopt::Std;
 
-my %opts = ();
-getopts('go:', \%opts);
+my %opts = (c=>4);
+getopts('go:c:', \%opts);
 
 die("Usage: run-flt [options] <raw.vcf>
 Options:
   -o STR      output prefix [auto]
+  -c FLOAT    max DP coefficient [4]
   -g          recall genotypes from PL/GL
 ") if @ARGV < 1;
 
@@ -32,7 +33,7 @@ die "ERROR: failed to infer the prefix for output. Please specify -o.\n" unless 
 my $cmd = '';
 my $cmd_gt = defined($opts{g})? qq{| $root/k8 $root/hapdip.js upd1gt} : '';
 system(qq{($root/k8 $root/hapdip.js deovlp $ARGV[0] $cmd_gt | $root/k8 $root/hapdip.js anno | gzip -1 > $prefix.anno.gz) 2> $prefix.flt.log});
-system(qq{($root/k8 $root/hapdip.js filter $prefix.anno.gz | $root/htsbox bgzip > $prefix.flt.vcf.gz) 2>> $prefix.flt.log});
+system(qq{($root/k8 $root/hapdip.js filter -c $opts{c} $prefix.anno.gz | $root/htsbox bgzip > $prefix.flt.vcf.gz) 2>> $prefix.flt.log});
 system(qq{$root/htsbox tabix -pvcf $prefix.flt.vcf.gz 2>> $prefix.flt.log});
 
 sub which {
